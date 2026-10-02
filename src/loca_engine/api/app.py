@@ -88,21 +88,26 @@ def create_app(
 
     @app.websocket("/ws/movement")
     async def movement(ws: WebSocket) -> None:
-        """Continuous movement channel.
+        """Continuous movement channel driven at a fixed tick rate by the joystick / WASD.
 
-        MVP: each message ``{"direction": "north", "distance_meters": 1}`` performs one
-        step and echoes back the new state. This establishes the transport that the
-        joystick/WASD loop (a later milestone) will drive at a fixed tick rate.
+        Each message moves once and echoes the new state. Prefer an arbitrary compass
+        heading for analog movement::
+
+            {"bearing": 123.4, "distance_meters": 0.6}
+
+        A cardinal ``{"direction": "north", ...}`` is still accepted (mapped to a bearing).
         """
         await ws.accept()
         try:
             while True:
                 msg = await ws.receive_json()
                 try:
-                    command = StepCommand(
-                        parse_direction(msg["direction"]), float(msg["distance_meters"])
-                    )
-                    state = await service.step(command)
+                    distance = float(msg["distance_meters"])
+                    if "bearing" in msg:
+                        bearing = float(msg["bearing"])
+                    else:
+                        bearing = parse_direction(msg["direction"]).bearing_degrees
+                    state = await service.move(bearing, distance)
                     out = StateOut.from_domain(state).model_dump(mode="json")
                     await ws.send_json({"ok": True, "state": out})
                 except (KeyError, ValueError) as exc:

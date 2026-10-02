@@ -91,6 +91,19 @@ def test_websocket_movement(client: TestClient):
         assert reply["state"]["location"]["longitude"] > 0.0
 
 
+def test_websocket_movement_bearing(client: TestClient):
+    client.post(
+        "/simulation/teleport",
+        json={"udid": UDID, "latitude": 0.0, "longitude": 0.0},
+    )
+    with client.websocket_connect("/ws/movement") as ws:
+        ws.send_json({"bearing": 90, "distance_meters": 50})  # due east
+        reply = ws.receive_json()
+        assert reply["ok"] is True
+        assert reply["state"]["location"]["longitude"] > 0.0
+        assert abs(reply["state"]["location"]["latitude"]) < 1e-6
+
+
 def test_websocket_bad_direction(client: TestClient):
     client.post(
         "/simulation/teleport",

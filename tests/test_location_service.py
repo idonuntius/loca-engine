@@ -47,6 +47,20 @@ async def test_step_before_teleport_is_rejected(service: SimulationService):
     assert exc.value.code is EngineErrorCode.SIMULATION_FAILED
 
 
+async def test_move_at_arbitrary_bearing_changes_both_axes(service: SimulationService):
+    await service.teleport(UDID, 35.0, 139.0)
+    state = await service.move(45.0, 100.0)  # north-east
+    assert state.location is not None
+    assert state.location.latitude > 35.0
+    assert state.location.longitude > 139.0
+
+
+async def test_move_before_teleport_is_rejected(service: SimulationService):
+    with pytest.raises(EngineError) as exc:
+        await service.move(90.0, 10.0)
+    assert exc.value.code is EngineErrorCode.SIMULATION_FAILED
+
+
 async def test_stop_returns_to_inactive(service: SimulationService):
     await service.teleport(UDID, 1.0, 2.0)
     state = await service.stop()

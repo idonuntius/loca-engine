@@ -61,31 +61,41 @@ class SimulationService:
             logger.info("teleport udid=%s lat=%s lon=%s", udid, latitude, longitude)
             return self._state
 
-    async def step(self, command: StepCommand) -> SimulationState:
-        """Move a fixed distance in a cardinal direction from the current location."""
+    async def move(self, bearing_degrees: float, distance_meters: float) -> SimulationState:
+        """Move ``distance_meters`` from the current location along ``bearing_degrees``.
+
+        Bearing is a true compass heading (0 = North, 90 = East); any angle is allowed,
+        so continuous joystick movement can follow a road at any orientation.
+        """
         async with self._lock:
             current = self._state.location
             if self._state.status is not SimulationStatus.ACTIVE or current is None:
                 raise EngineError(
                     EngineErrorCode.SIMULATION_FAILED,
                     "no active simulated location to move from",
-                    remedy="Teleport to a starting point before using step movement.",
+                    remedy="Teleport to a starting point before moving.",
                 )
             udid = self._state.udid
             assert udid is not None
-            destination = geo.step(current.coordinate, command.direction, command.distance_meters)
+            destination = geo.destination_point(
+                current.coordinate, distance_meters, bearing_degrees
+            )
             moved = SimulatedLocation.at(destination)
             await self._backend.set_location(udid, moved.latitude, moved.longitude)
             self._state = SimulationState(status=SimulationStatus.ACTIVE, udid=udid, location=moved)
             logger.info(
-                "step udid=%s dir=%s dist=%sm -> lat=%s lon=%s",
+                "move udid=%s bearing=%.1f dist=%sm -> lat=%s lon=%s",
                 udid,
-                command.direction.name,
-                command.distance_meters,
+                bearing_degrees,
+                distance_meters,
                 moved.latitude,
                 moved.longitude,
             )
             return self._state
+
+    async def step(self, command: StepCommand) -> SimulationState:
+        """Move a fixed distance in a cardinal direction (N/S/E/W)."""
+        return await self.move(command.direction.bearing_degrees, command.distance_meters)
 
     async def stop(self) -> SimulationState:
         """Stop simulation and restore the real GPS, best-effort.
