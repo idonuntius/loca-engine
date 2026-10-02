@@ -42,11 +42,20 @@ class LocationSession:
         self._task: asyncio.Task[None] | None = None
         self._ready: asyncio.Future[None] | None = None
 
-    async def start(self) -> None:
+    async def start(self, *, timeout: float = 12.0) -> None:
         loop = asyncio.get_running_loop()
         self._ready = loop.create_future()
         self._task = asyncio.create_task(self._run(), name="loca-location-session")
-        await self._ready  # raises if the channel could not be opened
+        try:
+            # Bound the RSD connect so a stale tunnel can't hang the request.
+            await asyncio.wait_for(asyncio.shield(self._ready), timeout)
+        except TimeoutError:
+            self._task.cancel()
+            raise EngineError(
+                EngineErrorCode.RSD_TUNNEL_UNAVAILABLE,
+                "timed out connecting to the device over the tunnel",
+                remedy="Unlock the iPhone (and keep it unlocked), then retry.",
+            ) from None
 
     async def set(self, latitude: float, longitude: float) -> None:
         if self._task is None or self._task.done():

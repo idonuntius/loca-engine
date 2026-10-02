@@ -16,14 +16,10 @@ from __future__ import annotations
 import logging
 
 from pymobiledevice3.lockdown import create_using_usbmux
-from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
-from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
-from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
 from pymobiledevice3.services.mobile_image_mounter import PersonalizedImageMounter
 from pymobiledevice3.usbmux import list_devices as usbmux_list_devices
 
 from ...domain.models import DiagnosticCheck, DiagnosticStatus
-from .tunnel import RsdEndpoint
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +74,16 @@ async def lockdown_checks(udid: str) -> list[DiagnosticCheck]:
         return checks
     checks.append(_ok("trusted", "Trusted"))
 
+    # Always close the lockdown connection: leaking them eventually wedges lockdownd.
+    try:
+        await _append_developer_checks(lockdown, checks)
+    finally:
+        await _safe_close(lockdown)
+
+    return checks
+
+
+async def _append_developer_checks(lockdown, checks: list[DiagnosticCheck]) -> None:
     try:
         dev_mode = await lockdown.get_developer_mode_status()
     except Exception as exc:  # noqa: BLE001
@@ -119,7 +125,26 @@ async def lockdown_checks(udid: str) -> list[DiagnosticCheck]:
                 )
             )
 
-    return checks
+
+async def _safe_close(lockdown) -> None:
+    try:
+        await lockdown.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def unresponsive_checks() -> list[DiagnosticCheck]:
+    """The device is plugged in but not answering developer requests in time."""
+    return [
+        _ok("device_connected", "Device connected"),
+        _fail(
+            "trusted",
+            "Device responding",
+            "the device did not answer developer requests in time",
+            "Unlock the iPhone and keep it unlocked; if it stays stuck, unplug and "
+            "replug the cable, then retry.",
+        ),
+    ]
 
 
 def tunnel_unavailable_checks(detail: str) -> list[DiagnosticCheck]:
@@ -135,26 +160,15 @@ def tunnel_unavailable_checks(detail: str) -> list[DiagnosticCheck]:
 
 
 def services_ok_checks() -> list[DiagnosticCheck]:
-    """Both services are known-good (e.g. a live simulation session already proves them)."""
+    """RSD tunnel + Location Simulation are ready.
+
+    We do *not* open a throwaway DVT LocationSimulation connection here: opening and
+    closing a second DVT channel on the shared native tunnel proved unreliable (it can
+    hang). Once the tunnel is up and the Developer Disk Image is mounted, location
+    simulation is available — it is actually verified when a teleport runs (which has
+    its own timeout + fresh-tunnel retry).
+    """
     return [
         _ok("rsd_tunnel", "RSD tunnel available"),
-        _ok("location_simulation", "Location Simulation available"),
+        _ok("location_simulation", "Location Simulation available", "verified on teleport"),
     ]
-
-
-async def probe_dvt(endpoint: RsdEndpoint) -> list[DiagnosticCheck]:
-    """Checks 5–6 using an existing tunnel endpoint (does NOT start a tunnel)."""
-    try:
-        rsd = RemoteServiceDiscoveryService((endpoint.host, endpoint.port))
-        async with rsd, DvtProvider(rsd) as dvt, LocationSimulation(dvt):
-            return services_ok_checks()
-    except Exception:  # noqa: BLE001
-        return [
-            _ok("rsd_tunnel", "RSD tunnel available"),
-            _fail(
-                "location_simulation",
-                "Location Simulation available",
-                "the Location Simulation service did not open",
-                "Re-mount the Developer Disk Image (reconnect with Xcode) and retry.",
-            ),
-        ]

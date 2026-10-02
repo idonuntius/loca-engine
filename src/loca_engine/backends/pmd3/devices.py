@@ -52,15 +52,22 @@ async def _summarize(udid: str, connection: ConnectionType) -> DeviceSummary:
         except Exception:  # noqa: BLE001
             return None
 
-    name = value("DeviceName") or udid
-    return DeviceSummary(
-        udid=udid,
-        name=name,
-        product_type=value("ProductType"),
-        # Marketing name ("iPhone 15 Pro") is not available offline; leave it to the
-        # client to map from product_type rather than guess here.
-        marketing_name=None,
-        ios_version=value("ProductVersion"),
-        build_version=value("BuildVersion"),
-        connection_type=connection,
-    )
+    try:
+        name = value("DeviceName") or udid
+        return DeviceSummary(
+            udid=udid,
+            name=name,
+            product_type=value("ProductType"),
+            # Marketing name ("iPhone 15 Pro") is not available offline; leave it to the
+            # client to map from product_type rather than guess here.
+            marketing_name=None,
+            ios_version=value("ProductVersion"),
+            build_version=value("BuildVersion"),
+            connection_type=connection,
+        )
+    finally:
+        # Close the lockdown connection — leaking them eventually wedges lockdownd.
+        try:
+            await lockdown.close()
+        except Exception:  # noqa: BLE001
+            pass

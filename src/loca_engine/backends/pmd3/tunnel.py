@@ -17,7 +17,7 @@ from ...domain.errors import EngineError, EngineErrorCode
 
 _RSD_ADDR = re.compile(r"RSD Address:\s*(\S+)")
 _RSD_PORT = re.compile(r"RSD Port:\s*(\d+)")
-_TUNNEL_TIMEOUT_S = 30.0
+_TUNNEL_TIMEOUT_S = 20.0
 
 
 @dataclass(frozen=True, slots=True)

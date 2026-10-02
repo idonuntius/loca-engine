@@ -2,9 +2,13 @@
 
 Holds **one** native RSD tunnel per device and reuses it for everything (Connection
 Doctor *and* location simulation). Creating/destroying native tunnels repeatedly
-conflicts with Apple's single shared tunnel and hangs, so the tunnel is opened once
-and kept until the device changes or the engine shuts down. The DVT LocationSimulation
-session is layered on top of that tunnel and opened/closed as simulation starts/stops.
+conflicts with Apple's single shared tunnel and hangs, so the tunnel is opened once and
+reused.
+
+A reused tunnel can still go stale (e.g. the iPhone locks, or Apple's tunnel resets),
+in which case connecting to its RSD endpoint would otherwise hang. Every tunnel-using
+operation is therefore bounded by a timeout and retried once on a freshly started
+tunnel; if that still fails we raise a typed error with a remedy instead of freezing.
 
 All device operations are serialized by one lock, so a long Doctor probe can't race a
 teleport over the shared tunnel. Device listing and state reads don't take the lock, so
@@ -25,6 +29,8 @@ from .tunnel import NativeTunnel, RsdEndpoint
 
 logger = logging.getLogger(__name__)
 
+LOCKDOWN_TIMEOUT = 10.0
+
 
 class Pmd3Backend:
     def __init__(self) -> None:
@@ -39,38 +45,28 @@ class Pmd3Backend:
 
     async def diagnose(self, udid: str) -> list[DiagnosticCheck]:
         async with self._lock:
-            checks = await diag.lockdown_checks(udid)
-            # Only attempt the tunnel/DVT probe if the device is reachable and trusted.
+            try:
+                checks = await asyncio.wait_for(
+                    diag.lockdown_checks(udid), timeout=LOCKDOWN_TIMEOUT
+                )
+            except TimeoutError:
+                checks = diag.unresponsive_checks()
+                checks.extend(diag.tunnel_unavailable_checks("device not responding"))
+                return checks
             if (
                 diag.status_of(checks, "device_connected") is not DiagnosticStatus.OK
                 or diag.status_of(checks, "trusted") is not DiagnosticStatus.OK
             ):
                 checks.extend(diag.tunnel_unavailable_checks("device not connected or trusted"))
                 return checks
-
-            try:
-                endpoint = await self._ensure_tunnel_locked(udid)
-            except EngineError as exc:
-                checks.extend(diag.tunnel_unavailable_checks(exc.message))
-                return checks
-
-            # A live simulation session already proves both services; don't open a second
-            # DVT channel on the same tunnel.
-            if self._session is not None:
-                checks.extend(diag.services_ok_checks())
-            else:
-                checks.extend(await diag.probe_dvt(endpoint))
+            checks.extend(await self._tunnel_checks_locked(udid))
             return checks
 
     async def start_simulation(self, udid: str) -> None:
         async with self._lock:
-            endpoint = await self._ensure_tunnel_locked(udid)
-            if self._session is not None:
+            if self._session is not None and self._active_udid == udid:
                 return  # idempotent
-            session = LocationSession(endpoint)
-            await session.start()
-            self._session = session
-            logger.info("session started udid=%s rsd=%s:%s", udid, endpoint.host, endpoint.port)
+            await self._start_session_locked(udid)
 
     async def set_location(self, udid: str, latitude: float, longitude: float) -> None:
         async with self._lock:
@@ -94,12 +90,51 @@ class Pmd3Backend:
 
     # --- internal (caller holds the lock) ----------------------------------
 
-    async def _ensure_tunnel_locked(self, udid: str) -> RsdEndpoint:
-        """Return a live tunnel endpoint for ``udid``, reusing the existing one."""
-        if self._tunnel is not None and self._tunnel.alive and self._active_udid == udid:
+    async def _start_session_locked(self, udid: str) -> None:
+        """Open a DVT session, reusing the tunnel then retrying on a fresh one."""
+        last_error: EngineError | None = None
+        for force_fresh in (False, True):
+            endpoint = await self._ensure_tunnel_locked(udid, force_fresh=force_fresh)
+            session = LocationSession(endpoint)
+            try:
+                await session.start()
+                self._session = session
+                logger.info("session started udid=%s rsd=%s:%s", udid, endpoint.host, endpoint.port)
+                return
+            except EngineError as exc:
+                last_error = exc
+                logger.warning("session start failed (fresh=%s): %s", force_fresh, exc.message)
+                await self._teardown_tunnel_locked()  # drop the stale tunnel before retrying
+        raise last_error or EngineError(
+            EngineErrorCode.SIMULATION_FAILED, "could not start the simulation session"
+        )
+
+    async def _tunnel_checks_locked(self, udid: str) -> list[DiagnosticCheck]:
+        """Doctor checks 5–6: make sure a tunnel is available (reuse, else start one).
+
+        Does not open a DVT channel — see :func:`diagnostics.services_ok_checks`. If a
+        live session exists the tunnel is already proven good.
+        """
+        if self._session is not None and self._active_udid == udid:
+            return diag.services_ok_checks()
+        try:
+            await self._ensure_tunnel_locked(udid, force_fresh=False)
+        except EngineError:
+            try:
+                await self._ensure_tunnel_locked(udid, force_fresh=True)
+            except EngineError as exc:
+                return diag.tunnel_unavailable_checks(exc.message)
+        return diag.services_ok_checks()
+
+    async def _ensure_tunnel_locked(self, udid: str, *, force_fresh: bool) -> RsdEndpoint:
+        if (
+            not force_fresh
+            and self._tunnel is not None
+            and self._tunnel.alive
+            and self._active_udid == udid
+        ):
             assert self._endpoint is not None
             return self._endpoint
-        # Different device or dead tunnel: tear everything down and start fresh.
         await self._teardown_locked()
         tunnel = NativeTunnel(udid)
         endpoint = await tunnel.start()
@@ -116,10 +151,13 @@ class Pmd3Backend:
                 logger.warning("error stopping location session", exc_info=True)
             self._session = None
 
-    async def _teardown_locked(self) -> None:
-        await self._close_session_locked()
+    async def _teardown_tunnel_locked(self) -> None:
         if self._tunnel is not None:
             await self._tunnel.stop()
             self._tunnel = None
         self._endpoint = None
         self._active_udid = None
+
+    async def _teardown_locked(self) -> None:
+        await self._close_session_locked()
+        await self._teardown_tunnel_locked()
