@@ -1,11 +1,14 @@
 """Connection Doctor checks for the pymobiledevice3 backend.
 
-Each check is an explicit :class:`DiagnosticCheck` with a status and, when not OK, a
-short remedy telling the user what to do next. We never surface raw exception strings:
-low-level failures are caught and mapped to a human sentence.
+Split in two so the backend can drive them around a single, reused RSD tunnel:
 
-Order mirrors the dependency chain a device must satisfy to simulate location:
-connected → trusted → Developer Mode → Developer Disk Image → RSD tunnel → LocationSim.
+* :func:`lockdown_checks` — connected / trusted / Developer Mode / DDI (no tunnel).
+* :func:`probe_dvt` — RSD tunnel + Location Simulation, using an *existing* tunnel
+  endpoint (never starts its own — starting a second native tunnel conflicts with the
+  one the backend already holds).
+
+Each check is an explicit :class:`DiagnosticCheck` with a status and, when not OK, a
+short remedy. Raw exception strings are never surfaced.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from pymobiledevice3.services.mobile_image_mounter import PersonalizedImageMount
 from pymobiledevice3.usbmux import list_devices as usbmux_list_devices
 
 from ...domain.models import DiagnosticCheck, DiagnosticStatus
-from .tunnel import NativeTunnel
+from .tunnel import RsdEndpoint
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +42,14 @@ def _unknown(id: str, title: str, detail: str) -> DiagnosticCheck:
     return DiagnosticCheck(id=id, title=title, status=DiagnosticStatus.UNKNOWN, detail=detail)
 
 
-async def diagnose(udid: str, *, probe_services: bool = True) -> list[DiagnosticCheck]:
+def status_of(checks: list[DiagnosticCheck], check_id: str) -> DiagnosticStatus | None:
+    return next((c.status for c in checks if c.id == check_id), None)
+
+
+async def lockdown_checks(udid: str) -> list[DiagnosticCheck]:
+    """Checks 1–4: connected, trusted, Developer Mode, Developer Disk Image."""
     checks: list[DiagnosticCheck] = []
 
-    # 1. Device connected (present on usbmux)?
     serials = {getattr(d, "serial", None) for d in await usbmux_list_devices()}
     if udid not in serials:
         checks.append(
@@ -56,7 +63,6 @@ async def diagnose(udid: str, *, probe_services: bool = True) -> list[Diagnostic
         return checks
     checks.append(_ok("device_connected", "Device connected"))
 
-    # 2. Trusted / paired? (do not trigger a trust prompt here)
     try:
         lockdown = await create_using_usbmux(serial=udid, autopair=False)
     except Exception as exc:  # noqa: BLE001
@@ -72,14 +78,12 @@ async def diagnose(udid: str, *, probe_services: bool = True) -> list[Diagnostic
         return checks
     checks.append(_ok("trusted", "Trusted"))
 
-    # 3. Developer Mode enabled?
     try:
         dev_mode = await lockdown.get_developer_mode_status()
     except Exception as exc:  # noqa: BLE001
         checks.append(
             _unknown("developer_mode", "Developer Mode enabled", f"could not read: {exc}")
         )
-        dev_mode = None
     else:
         if dev_mode:
             checks.append(_ok("developer_mode", "Developer Mode enabled"))
@@ -94,7 +98,6 @@ async def diagnose(udid: str, *, probe_services: bool = True) -> list[Diagnostic
                 )
             )
 
-    # 4. Developer Disk Image mounted? (iOS 17+ personalized image)
     try:
         mounter = PersonalizedImageMounter(lockdown)
         mounted = await mounter.is_image_mounted(mounter.IMAGE_TYPE)
@@ -116,41 +119,35 @@ async def diagnose(udid: str, *, probe_services: bool = True) -> list[Diagnostic
                 )
             )
 
-    # 5 & 6. RSD tunnel + Location Simulation. Only probe if asked (it's heavy and
-    # must not run while a live session already holds the tunnel).
-    if not probe_services:
-        checks.append(_unknown("rsd_tunnel", "RSD tunnel available", "not probed (session active)"))
-        checks.append(
-            _unknown("location_simulation", "Location Simulation available", "not probed")
-        )
-        return checks
-
-    checks.extend(await _probe_services())
     return checks
 
 
-async def _probe_services() -> list[DiagnosticCheck]:
-    """Actually open a short-lived tunnel + DVT channel to prove they work."""
-    tunnel = NativeTunnel()
-    try:
-        endpoint = await tunnel.start()
-    except Exception as exc:  # noqa: BLE001
-        return [
-            _fail(
-                "rsd_tunnel",
-                "RSD tunnel available",
-                "could not establish the RSD tunnel",
-                "Ensure Developer Mode is on and the device is unlocked, then retry.",
-            ),
-            _unknown("location_simulation", "Location Simulation available", f"skipped: {exc}"),
-        ]
+def tunnel_unavailable_checks(detail: str) -> list[DiagnosticCheck]:
+    return [
+        _fail(
+            "rsd_tunnel",
+            "RSD tunnel available",
+            detail,
+            "Ensure Developer Mode is on and the device is unlocked, then retry.",
+        ),
+        _unknown("location_simulation", "Location Simulation available", "skipped: no tunnel"),
+    ]
+
+
+def services_ok_checks() -> list[DiagnosticCheck]:
+    """Both services are known-good (e.g. a live simulation session already proves them)."""
+    return [
+        _ok("rsd_tunnel", "RSD tunnel available"),
+        _ok("location_simulation", "Location Simulation available"),
+    ]
+
+
+async def probe_dvt(endpoint: RsdEndpoint) -> list[DiagnosticCheck]:
+    """Checks 5–6 using an existing tunnel endpoint (does NOT start a tunnel)."""
     try:
         rsd = RemoteServiceDiscoveryService((endpoint.host, endpoint.port))
         async with rsd, DvtProvider(rsd) as dvt, LocationSimulation(dvt):
-            return [
-                _ok("rsd_tunnel", "RSD tunnel available"),
-                _ok("location_simulation", "Location Simulation available"),
-            ]
+            return services_ok_checks()
     except Exception:  # noqa: BLE001
         return [
             _ok("rsd_tunnel", "RSD tunnel available"),
@@ -161,5 +158,3 @@ async def _probe_services() -> list[DiagnosticCheck]:
                 "Re-mount the Developer Disk Image (reconnect with Xcode) and retry.",
             ),
         ]
-    finally:
-        await tunnel.stop()

@@ -72,6 +72,10 @@ class NativeTunnel:
             if host and port:
                 return RsdEndpoint(host=host, port=port)
 
+    @property
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.returncode is None
+
     async def stop(self) -> None:
         proc = self._proc
         if proc is None or proc.returncode is not None:
