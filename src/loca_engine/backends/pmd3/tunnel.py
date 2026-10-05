@@ -35,7 +35,13 @@ class NativeTunnel:
         self.endpoint: RsdEndpoint | None = None
 
     async def start(self) -> RsdEndpoint:
-        cmd = [sys.executable, "-m", "pymobiledevice3", "remote", "start-tunnel", "--native"]
+        if getattr(sys, "frozen", False):
+            # Frozen build: `sys.executable` is the loca-engine binary, which can't run
+            # `-m pymobiledevice3`. Re-invoke our multi-call `pmd3` entry (see cli.main),
+            # which dispatches into the bundled pymobiledevice3 CLI.
+            cmd = [sys.executable, "pmd3", "remote", "start-tunnel", "--native"]
+        else:
+            cmd = [sys.executable, "-m", "pymobiledevice3", "remote", "start-tunnel", "--native"]
         if self._udid:
             cmd += ["--udid", self._udid]
         self._proc = await asyncio.create_subprocess_exec(

@@ -175,6 +175,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    raw = sys.argv[1:] if argv is None else argv
+    # Multi-call entry. A frozen (PyInstaller) build has no external
+    # `python -m pymobiledevice3` to shell out to — `sys.executable` is this binary —
+    # so tunnel.py re-invokes us as `loca-engine pmd3 <args...>`; dispatch those
+    # straight into the bundled pymobiledevice3 CLI (its `__main__`).
+    if raw and raw[0] == "pmd3":
+        import runpy
+
+        sys.argv = ["pymobiledevice3", *raw[1:]]
+        runpy.run_module("pymobiledevice3", run_name="__main__")
+        return
     parser = _build_parser()
     args = parser.parse_args(argv)
     args.func(args)
