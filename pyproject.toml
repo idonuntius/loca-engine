@@ -1,6 +1,6 @@
 [project]
 name = "loca-engine"
-version = "0.0.1"
+version = "0.1.0"
 description = "Location Engine for Loca — injects simulated location into connected iPhones via pymobiledevice3"
 readme = "README.md"
 license = "GPL-3.0-or-later"
