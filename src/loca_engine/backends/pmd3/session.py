@@ -8,6 +8,12 @@ We keep it open inside a single dedicated asyncio task (an "actor") that owns th
 ``async with`` scope. Callers submit commands over a queue; the actor guarantees the
 channel is torn down correctly (via ``__aexit__``) even on cancellation or error. This
 avoids juggling ``__aenter__``/``__aexit__`` by hand across many request handlers.
+
+A single send produces a single CoreLocation fix, which then ages. Apps that skip stale
+fixes (e.g. Flutter's ``location`` plugin drops fixes older than 15 s) would never see a
+held position, so while no new command arrives the actor re-sends the last coordinate
+every ``keepalive_interval`` seconds — like a real GPS emitting a fresh fix each second.
+Movement commands arrive faster than that, so they are never delayed or interleaved.
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ from .tunnel import RsdEndpoint
 
 logger = logging.getLogger(__name__)
 
+KEEPALIVE_INTERVAL_S = 1.0
+
 
 @dataclass(slots=True)
 class _SetCommand:
@@ -36,8 +44,11 @@ class _SetCommand:
 class LocationSession:
     """Owns an open LocationSimulation channel for one device."""
 
-    def __init__(self, endpoint: RsdEndpoint) -> None:
+    def __init__(
+        self, endpoint: RsdEndpoint, *, keepalive_interval: float = KEEPALIVE_INTERVAL_S
+    ) -> None:
         self._endpoint = endpoint
+        self._keepalive_interval = keepalive_interval
         self._queue: asyncio.Queue[_SetCommand | None] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
         self._ready: asyncio.Future[None] | None = None
@@ -102,8 +113,20 @@ class LocationSession:
                 )
 
     async def _serve(self, sim: LocationSimulation) -> None:
+        last: tuple[float, float] | None = None  # re-sent while idle; None = nothing to hold
         while True:
-            command = await self._queue.get()
+            try:
+                command = await asyncio.wait_for(self._queue.get(), self._keepalive_interval)
+            except TimeoutError:
+                if last is not None:
+                    try:
+                        await sim.set(*last)
+                    except Exception:  # noqa: BLE001 - keep-alive is best-effort
+                        # Stop re-sending (no log spam); the next real set re-arms it and
+                        # surfaces the failure to the caller if the channel is dead.
+                        logger.warning("keep-alive re-send failed", exc_info=True)
+                        last = None
+                continue
             if command is None:  # stop sentinel
                 try:
                     await sim.clear()
@@ -112,6 +135,7 @@ class LocationSession:
                 return
             try:
                 await sim.set(command.latitude, command.longitude)
+                last = (command.latitude, command.longitude)
                 command.future.set_result(None)
             except Exception as exc:  # noqa: BLE001
                 if not command.future.done():
