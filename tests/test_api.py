@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from loca_engine import __version__
 from loca_engine.api import create_app
 from loca_engine.backends.fake import FakeBackend
 from loca_engine.location.service import SimulationService
@@ -19,7 +20,7 @@ def client() -> TestClient:
 def test_health(client: TestClient):
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json() == {"status": "ok", "version": __version__}
 
 
 def test_list_devices(client: TestClient):
@@ -113,3 +114,9 @@ def test_websocket_bad_direction(client: TestClient):
         ws.send_json({"direction": "upward", "distance_meters": 5})
         reply = ws.receive_json()
         assert reply["ok"] is False
+
+
+def test_version_matches_package_metadata():
+    from importlib.metadata import version
+
+    assert version("loca-engine") == __version__

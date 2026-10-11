@@ -814,7 +814,6 @@ wheels = [
 
 [[package]]
 name = "loca-engine"
-version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

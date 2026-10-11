@@ -15,6 +15,7 @@ from contextlib import AbstractAsyncContextManager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from .. import __version__
 from ..domain.errors import EngineError, EngineErrorCode
 from ..domain.models import StepCommand
 from ..location.service import SimulationService
@@ -48,7 +49,7 @@ def create_app(
     service: SimulationService,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="loca-engine", version="0.0.1", lifespan=lifespan)
+    app = FastAPI(title="loca-engine", version=__version__, lifespan=lifespan)
 
     @app.exception_handler(EngineError)
     async def _engine_error_handler(_request, exc: EngineError) -> JSONResponse:
@@ -58,7 +59,8 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok"}
+        # The GUI compares `version` against the latest Homebrew formula to offer updates.
+        return {"status": "ok", "version": __version__}
 
     @app.get("/devices", response_model=list[DeviceOut])
     async def list_devices() -> list[DeviceOut]:

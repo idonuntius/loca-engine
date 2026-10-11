@@ -25,6 +25,8 @@ import sys
 import urllib.error
 import urllib.request
 
+from . import __version__
+
 DEFAULT_HOST = "127.0.0.1"
 
 
@@ -149,6 +151,7 @@ def _print_state(state: object) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="loca", description="Loca location engine CLI")
     parser.add_argument("--port", type=int, help="engine port (default: $LOCA_ENGINE_PORT)")
+    parser.add_argument("--version", action="version", version=f"loca-engine {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("serve", help="run the engine API server").set_defaults(func=_cmd_serve)
