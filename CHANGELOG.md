@@ -2,6 +2,12 @@
 
 All notable changes to the Loca Location Engine (`loca-engine`).
 
+## 0.1.3 — 2026-10-11
+
+- **The engine reports its version.** `GET /health` now returns `{"status": "ok", "version": …}`
+  and `loca-engine --version` prints it. Loca.app uses this to offer an in-app update when a
+  newer engine is published in the Homebrew tap.
+
 ## 0.1.2 — 2026-10-10
 
 - **Held locations are re-sent every second.** While no new location is being sent, the engine
